@@ -1,4 +1,5 @@
-//! Pedersen hash by precomputed window tables, used by [`crate::Node::combine_pairs`]
+//! Pedersen hash by precomputed window tables, used by [`crate::Node`]'s
+//! [`combine_pairs`](incrementalmerkletree::Hashable::combine_pairs)
 //!
 //! - One 7M mixed addition per [`WINDOW_BITS`] input bits, no scalar-field arithmetic
 //! - Projective output, so a batch of hashes shares one inversion
