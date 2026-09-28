@@ -30,6 +30,8 @@ and this library adheres to Rust's notion of
 - `bundle::{SpendDescriptionEncoding, OutputDescriptionEncoding, BundleEncoding}`,
   the views of the byte encodings implemented by both tiers, so serialization,
   the ZIP-244 digests and the v4 sighash are written once rather than once per tier
+- `Node::combine_pairs`, hashing a tree level's parents in one batch, equal to
+  `Hashable::combine` per pair (9-bit window tables, one inversion per batch)
 
 ## [0.9.0] - 2026-09-30
 

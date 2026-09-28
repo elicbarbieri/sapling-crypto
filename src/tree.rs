@@ -9,7 +9,7 @@ use core::fmt;
 
 use super::{
     note::ExtractedNoteCommitment,
-    pedersen_hash::{pedersen_hash, Personalization},
+    pedersen_hash::{pedersen_hash, windowed, Personalization},
 };
 
 pub const NOTE_COMMITMENT_TREE_DEPTH: u8 = 32;
@@ -68,6 +68,41 @@ fn merkle_hash_field(depth: usize, lhs: &[u8; 32], rhs: &[u8; 32]) -> jubjub::Ba
     ))
     .to_affine()
     .get_u()
+}
+
+/// Length of [`Personalization::get_bits`]
+const PERSONALIZATION_BITS: usize = 6;
+
+/// Bits of each child a Merkle hash takes
+const CHILD_BITS: usize = bls12_381::Scalar::NUM_BITS as usize;
+
+/// Personalization ‖ lhs ‖ rhs
+const MERKLE_INPUT_BITS: usize = PERSONALIZATION_BITS + 2 * CHILD_BITS;
+
+/// [`merkle_hash_field`] by the windowed tables, still projective
+fn merkle_hash_point(depth: u8, lhs: &jubjub::Base, rhs: &jubjub::Base) -> jubjub::ExtendedPoint {
+    // all-ones = `Personalization::NoteCommitment`
+    assert!(
+        usize::from(depth) < (1 << PERSONALIZATION_BITS) - 1,
+        "depth within MerkleTree(_)"
+    );
+    let mut words = [0u64; MERKLE_INPUT_BITS.div_ceil(64)];
+    words[0] = u64::from(depth);
+    place_child(&mut words, lhs, PERSONALIZATION_BITS);
+    place_child(&mut words, rhs, PERSONALIZATION_BITS + CHILD_BITS);
+    windowed::hash_bits(&words, MERKLE_INPUT_BITS)
+}
+
+/// ORs `child`'s little-endian bits into `words` from bit `at` (canonical, so under [`CHILD_BITS`])
+fn place_child(words: &mut [u64], child: &jubjub::Base, at: usize) {
+    for (i, limb) in child.to_bytes().chunks_exact(8).enumerate() {
+        let limb = u64::from_le_bytes(limb.try_into().expect("8-byte limb"));
+        let (word, shift) = ((at + 64 * i) / 64, (at + 64 * i) % 64);
+        words[word] |= limb << shift;
+        if shift > 0 {
+            words[word + 1] |= limb >> (64 - shift);
+        }
+    }
 }
 
 /// The root of a Sapling commitment tree.
@@ -132,6 +167,23 @@ impl Node {
     /// Constructs a new note commitment tree node from a [`bls12_381::Scalar`]
     pub fn from_scalar(cmu: bls12_381::Scalar) -> Self {
         Self(cmu)
+    }
+
+    /// Parents of `children` taken pairwise at `level`, equal to [`Hashable::combine`] per pair
+    ///
+    /// - Hashes by precomputed 9-bit window tables
+    /// - One field inversion for the whole batch (`combine` pays one per parent)
+    /// - Panics if `children` has an odd length or `level` >= 63 (same as `combine`)
+    pub fn combine_pairs(level: Level, children: &[Node]) -> Vec<Node> {
+        assert!(children.len().is_multiple_of(2), "children pair up");
+        let depth = u8::from(level);
+        let parents: Vec<jubjub::ExtendedPoint> = children
+            .chunks_exact(2)
+            .map(|pair| merkle_hash_point(depth, &pair[0].0, &pair[1].0))
+            .collect();
+        let mut affine = vec![jubjub::AffinePoint::identity(); parents.len()];
+        jubjub::ExtendedPoint::batch_normalize(&parents, &mut affine);
+        affine.iter().map(|parent| Node(parent.get_u())).collect()
     }
 
     /// Parses a tree leaf from the bytes of a Sapling note commitment.
@@ -206,5 +258,59 @@ pub(super) mod testing {
         fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Node {
             Node::from_scalar(bls12_381::Scalar::random(rng))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+    use incrementalmerkletree::{Hashable, Level};
+    use rand_core::SeedableRng;
+    use rand_xorshift::XorShiftRng;
+
+    use super::{Anchor, Node, NOTE_COMMITMENT_TREE_DEPTH};
+
+    #[test]
+    fn combine_pairs_equals_combine_per_pair() {
+        let rng = &mut XorShiftRng::from_seed([5; 16]);
+        for (level, pairs) in [(0u8, 0usize), (0, 1), (7, 3), (15, 64), (31, 33)] {
+            let level = Level::from(level);
+            let children: Vec<Node> = (0..2 * pairs).map(|_| Node::random(rng)).collect();
+            let expected: Vec<Node> = children
+                .chunks_exact(2)
+                .map(|pair| Node::combine(level, &pair[0], &pair[1]))
+                .collect();
+            assert_eq!(
+                Node::combine_pairs(level, &children),
+                expected,
+                "{level:?}, {pairs} pairs"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "children pair up")]
+    fn combine_pairs_refuses_an_odd_count() {
+        Node::combine_pairs(Level::from(0), &[Node::empty_leaf()]);
+    }
+
+    #[test]
+    #[should_panic(expected = "depth within MerkleTree(_)")]
+    fn combine_pairs_refuses_the_note_commitment_personalization() {
+        Node::combine_pairs(Level::from(63), &[Node::empty_leaf(), Node::empty_leaf()]);
+    }
+
+    /// Published Sapling empty root (zcashd's `3e49b5f9…c2fb`, byte-reversed here)
+    #[test]
+    fn combine_pairs_rebuilds_the_published_empty_root() {
+        let mut node = Node::empty_leaf();
+        for level in 0..NOTE_COMMITMENT_TREE_DEPTH {
+            node = Node::combine_pairs(Level::from(level), &[node, node])[0];
+        }
+        let root = Anchor::from(node).to_bytes();
+        assert_eq!(
+            hex::encode(root),
+            "fbc2f4300c01f0b7820d00e3347c8da4ee614674376cbc45359daa54f9b5493e"
+        );
     }
 }
