@@ -79,6 +79,21 @@ const CHILD_BITS: usize = bls12_381::Scalar::NUM_BITS as usize;
 /// Personalization ‖ lhs ‖ rhs
 const MERKLE_INPUT_BITS: usize = PERSONALIZATION_BITS + 2 * CHILD_BITS;
 
+/// Pairs per rayon task (one inversion amortised over 32 ≈ 9 µs hashes)
+#[cfg(feature = "multicore")]
+const PAIRS_PER_TASK: usize = 32;
+
+/// One task's parents: every hash projective, then one batched inversion
+fn parents(depth: u8, children: &[Node]) -> Vec<Node> {
+    let points: Vec<jubjub::ExtendedPoint> = children
+        .chunks_exact(2)
+        .map(|pair| merkle_hash_point(depth, &pair[0].0, &pair[1].0))
+        .collect();
+    let mut affine = vec![jubjub::AffinePoint::identity(); points.len()];
+    jubjub::ExtendedPoint::batch_normalize(&points, &mut affine);
+    affine.iter().map(|parent| Node(parent.get_u())).collect()
+}
+
 /// [`merkle_hash_field`] by the windowed tables, still projective
 fn merkle_hash_point(depth: u8, lhs: &jubjub::Base, rhs: &jubjub::Base) -> jubjub::ExtendedPoint {
     // all-ones = `Personalization::NoteCommitment`
@@ -169,23 +184,6 @@ impl Node {
         Self(cmu)
     }
 
-    /// Parents of `children` taken pairwise at `level`, equal to [`Hashable::combine`] per pair
-    ///
-    /// - Hashes by precomputed 9-bit window tables
-    /// - One field inversion for the whole batch (`combine` pays one per parent)
-    /// - Panics if `children` has an odd length or `level` >= 63 (same as `combine`)
-    pub fn combine_pairs(level: Level, children: &[Node]) -> Vec<Node> {
-        assert!(children.len().is_multiple_of(2), "children pair up");
-        let depth = u8::from(level);
-        let parents: Vec<jubjub::ExtendedPoint> = children
-            .chunks_exact(2)
-            .map(|pair| merkle_hash_point(depth, &pair[0].0, &pair[1].0))
-            .collect();
-        let mut affine = vec![jubjub::AffinePoint::identity(); parents.len()];
-        jubjub::ExtendedPoint::batch_normalize(&parents, &mut affine);
-        affine.iter().map(|parent| Node(parent.get_u())).collect()
-    }
-
     /// Parses a tree leaf from the bytes of a Sapling note commitment.
     ///
     /// Returns `None` if the provided bytes represent a non-canonical encoding.
@@ -216,6 +214,24 @@ impl Hashable for Node {
             &lhs.0.to_bytes(),
             &rhs.0.to_bytes(),
         ))
+    }
+
+    /// - Hashes by precomputed 9-bit window tables, one field inversion per batch
+    /// - `multicore`: wide levels split across rayon tasks (one inversion each)
+    /// - Panics if `children` has an odd length or `level` >= 63 (same as `combine`)
+    fn combine_pairs(level: Level, children: &[Self]) -> Vec<Self> {
+        assert!(children.len().is_multiple_of(2), "children pair up");
+        let depth = u8::from(level);
+        // below one task, no pool handoff (a lone pair = the root's serial chain)
+        #[cfg(feature = "multicore")]
+        if children.len() > 2 * PAIRS_PER_TASK {
+            use rayon::prelude::*;
+            return children
+                .par_chunks(2 * PAIRS_PER_TASK)
+                .flat_map_iter(|chunk| parents(depth, chunk))
+                .collect();
+        }
+        parents(depth, children)
     }
 
     fn empty_root(level: Level) -> Self {

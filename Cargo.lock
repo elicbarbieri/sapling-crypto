@@ -755,9 +755,8 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "incrementalmerkletree"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53227276b450ef58e4899e656ab4e9b4188aab0efc465f761bdbe56403ede61a"
+version = "0.8.2"
+source = "git+https://github.com/elicbarbieri/incrementalmerkletree.git?rev=61325f3795048031a6941db591cd6773f774e724#61325f3795048031a6941db591cd6773f774e724"
 dependencies = [
  "either",
  "proptest",
@@ -1463,6 +1462,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_core 0.10.1",
  "rand_xorshift 0.5.0",
+ "rayon",
  "redjubjub",
  "subtle",
  "tracing",
