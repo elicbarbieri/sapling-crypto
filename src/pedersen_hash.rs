@@ -3,6 +3,8 @@
 #[cfg(test)]
 pub(crate) mod test_vectors;
 
+pub(crate) mod windowed;
+
 use alloc::vec::Vec;
 use core::ops::{AddAssign, Neg};
 use ff::PrimeField;
